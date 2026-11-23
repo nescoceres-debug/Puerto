@@ -93,7 +93,7 @@
   </section>
 
   <section class="card half">
-    <h2>Ahora</h2>
+    <h2 id="nowH">Ahora</h2>
     <div class="now">
       <div><div class="ico" id="nowIco"></div><div class="big" id="nowT">–</div><div class="note" id="nowDesc"></div></div>
       <div class="kv" id="nowKv"></div>
@@ -101,7 +101,7 @@
   </section>
 
   <section class="card half">
-    <h2>Viento</h2>
+    <h2 id="windCardH">Viento</h2>
     <div class="wind">
       <svg class="compass" viewBox="-55 -55 110 110" id="compass"></svg>
       <div>
@@ -239,6 +239,7 @@ function renderView(){
   $("windH").textContent = "Viento y ráfagas (nudos) · " + lbl;
   $("hourlyH").textContent = "Hora por hora · " + lbl + (S.span>1 ? " (cada 3 h)" : "");
   const win = viewWindow();
+  if(S.day===0 && S.span===1) renderNow(S.w, S.mar); else renderDaySummary();
   renderWind(win);
   renderHourly(win);
   renderDaily();
@@ -257,7 +258,7 @@ async function load(){
 
   const wx = `https://api.open-meteo.com/v1/forecast?latitude=${p.lat}&longitude=${p.lon}`
     + `&current=temperature_2m,apparent_temperature,relative_humidity_2m,pressure_msl,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation`
-    + `&hourly=temperature_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,is_day`
+    + `&hourly=temperature_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,is_day,relative_humidity_2m,pressure_msl`
     + `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset`
     + `&wind_speed_unit=kn&timezone=auto&forecast_days=10`;
   const mar = `https://marine-api.open-meteo.com/v1/marine?latitude=${p.mlat}&longitude=${p.mlon}`
@@ -268,8 +269,8 @@ async function load(){
     const [w, m] = await Promise.all([fetch(wx).then(chk), fetch(mar).then(chk).catch(e => ({error:e.message}))]);
     S.w = w; S.nowT = Date.now() + w.utc_offset_seconds*1000; // "UTC falso" en hora local del puerto
     S.m = (m.error || !m.hourly || m.hourly.sea_level_height_msl.every(v => v==null)) ? null : m;
+    S.mar = m.error ? null : m;
     S.day = Math.min(S.day, w.daily.time.length-1);
-    renderNow(w, m);
     renderView();
     if(!S.m) throw new Error("Sin datos de marea para este punto" + (m.error?": "+m.error:""));
     $("sub").textContent = `${p.prov} · actualizado ${hhmm(S.nowT)} (hora local)`;
@@ -285,27 +286,79 @@ const chk = r => { if(!r.ok) throw new Error("HTTP " + r.status); return r.json(
 // ---------- Ahora ----------
 function renderNow(w, m){
   const c = w.current, [desc, ico] = wmo(c.weather_code);
-  $("nowIco").textContent = ico;
-  $("nowT").textContent = r0(c.temperature_2m) + "°";
-  $("nowDesc").textContent = desc + " · ST " + r0(c.apparent_temperature) + "°";
   const wv = m && m.current ? m.current : null;
-  const items = [
-    ["Humedad", r0(c.relative_humidity_2m) + " %"],
-    ["Presión", r0(c.pressure_msl) + " hPa"],
-    ["Precipitación", r1(c.precipitation) + " mm"],
-    ["Olas", wv && wv.wave_height!=null ? r1(wv.wave_height) + " m" : "–"],
-    ["Período ola", wv && wv.wave_period!=null ? r0(wv.wave_period) + " s" : "–"],
-    ["Olas desde", wv && wv.wave_direction!=null ? card(wv.wave_direction) : "–"],
-  ];
-  $("nowKv").innerHTML = items.map(([k,v]) => `<div><b>${v}</b><span>${k}</span></div>`).join("");
+  $("nowH").textContent = "Ahora";
+  $("windCardH").textContent = "Viento ahora";
+  paintWeather({
+    ico, big: r0(c.temperature_2m) + "°", desc: desc + " · ST " + r0(c.apparent_temperature) + "°",
+    items: [
+      ["Humedad", r0(c.relative_humidity_2m) + " %"],
+      ["Presión", r0(c.pressure_msl) + " hPa"],
+      ["Precipitación", r1(c.precipitation) + " mm"],
+      ["Olas", wv && wv.wave_height!=null ? r1(wv.wave_height) + " m" : "–"],
+      ["Período ola", wv && wv.wave_period!=null ? r0(wv.wave_period) + " s" : "–"],
+      ["Olas desde", wv && wv.wave_direction!=null ? card(wv.wave_direction) : "–"],
+    ]
+  });
+  const cd = card(c.wind_direction_10m);
+  paintWind(c.wind_speed_10m, c.wind_gusts_10m, c.wind_direction_10m,
+    `Viene del ${cd} (${r0(c.wind_direction_10m)}°)` + (DIRNAME[cd] ? ` · viento ${DIRNAME[cd].toLowerCase()}` : ""));
+}
 
-  // viento
-  const s = c.wind_speed_10m, g = c.wind_gusts_10m, d = c.wind_direction_10m, col = windColor(Math.max(s, g*0.75));
+// Resumen del día (o días) elegidos
+function renderDaySummary(){
+  const [a, b] = viewWindow(), h = S.w.hourly, d = S.w.daily, last = Math.min(S.day + S.span - 1, d.time.length - 1);
+  const ts = h.time.map(parseT), idx = ts.map((t,i)=>i).filter(i => ts[i] >= a && ts[i] < b);
+  const vals = k => idx.map(i => h[k][i]).filter(v => v!=null);
+  const avg = arr => arr.reduce((x,y)=>x+y,0) / (arr.length||1);
+  const days = []; for(let i=S.day;i<=last;i++) days.push(i);
+  const code = Math.max(...days.map(i => d.weather_code[i]));
+  const [desc, ico] = wmo(code);
+  const tMax = Math.max(...days.map(i => d.temperature_2m_max[i])), tMin = Math.min(...days.map(i => d.temperature_2m_min[i]));
+  const rain = days.reduce((s,i) => s + (d.precipitation_sum[i]||0), 0), pMax = Math.max(...days.map(i => d.precipitation_probability_max[i]||0));
+  const hum = vals("relative_humidity_2m"), pr = vals("pressure_msl");
+  // olas: máximo en la ventana
+  let wvH = null, wvP = null, wvD = null;
+  if(S.mar && S.mar.hourly){
+    const mh = S.mar.hourly, mt = mh.time.map(parseT);
+    mt.forEach((t,i) => { if(t>=a && t<b && mh.wave_height[i]!=null && (wvH==null || mh.wave_height[i] > wvH)){ wvH = mh.wave_height[i]; wvP = mh.wave_period[i]; wvD = mh.wave_direction[i]; } });
+  }
+  const lbl = S.span===1 ? (S.day===1 ? "Mañana" : dayName(S.day)) : $("rangeLbl").textContent;
+  $("nowH").textContent = "Pronóstico · " + lbl;
+  $("windCardH").textContent = "Viento · " + lbl;
+  paintWeather({
+    ico, big: r0(tMax) + "°", desc: `Mín ${r0(tMin)}° · ${desc}`,
+    items: [
+      ["Humedad media", hum.length ? r0(avg(hum)) + " %" : "–"],
+      ["Presión", pr.length ? `${r0(Math.min(...pr))}–${r0(Math.max(...pr))} hPa` : "–"],
+      ["Lluvia total", `${r1(rain)} mm · ${r0(pMax)}%`],
+      ["Olas máx.", wvH!=null ? r1(wvH) + " m" : "–"],
+      ["Período ola", wvP!=null ? r0(wvP) + " s" : "–"],
+      ["Olas desde", wvD!=null ? card(wvD) : "–"],
+    ]
+  });
+  // viento: la hora de viento medio más fuerte, y la ráfaga máxima
+  let iMax = idx[0];
+  idx.forEach(i => { if(h.wind_speed_10m[i] > h.wind_speed_10m[iMax]) iMax = i; });
+  const gMax = Math.max(...vals("wind_gusts_10m")), dir = h.wind_direction_10m[iMax], cd = card(dir);
+  const when = (S.span>1 ? "el " + dayLbl(ts[iMax]) + " " : "") + "a las " + hhmm(ts[iMax]);
+  paintWind(h.wind_speed_10m[iMax], gMax, dir,
+    `Máximo ${when}, del ${cd}` + (DIRNAME[cd] ? ` (viento ${DIRNAME[cd].toLowerCase()})` : "") + ` · predominante del ${card(d.wind_direction_10m_dominant[S.day])}`);
+}
+
+function paintWeather({ico, big, desc, items}){
+  $("nowIco").textContent = ico;
+  $("nowT").textContent = big;
+  $("nowDesc").textContent = desc;
+  $("nowKv").innerHTML = items.map(([k,v]) => `<div><b>${v}</b><span>${k}</span></div>`).join("");
+}
+
+function paintWind(s, g, d, dirText){
+  const col = windColor(Math.max(s, g*0.75));
   $("wSpd").innerHTML = `${r0(s)} <small>kn · ${r0(s*1.852)} km/h</small>`;
   $("wGust").textContent = `${r0(g)} kn (${r0(g*1.852)} km/h)`;
   $("wCat").textContent = windCat(s); $("wCat").style.background = windColor(s);
-  const cd = card(d);
-  $("wDir").textContent = `Viene del ${cd} (${r0(d)}°)` + (DIRNAME[cd] ? ` · viento ${DIRNAME[cd].toLowerCase()}` : "");
+  $("wDir").textContent = dirText;
   let ticks = "";
   for(let i=0;i<16;i++){ const a=i*22.5*Math.PI/180, r1_=i%4?44:40; ticks += `<line x1="${Math.sin(a)*r1_}" y1="${-Math.cos(a)*r1_}" x2="${Math.sin(a)*47}" y2="${-Math.cos(a)*47}" stroke="var(--line)" stroke-width="${i%4?1:2}"/>`; }
   $("compass").innerHTML = `<circle r="48" fill="var(--card2)" stroke="var(--line)"/>${ticks}
