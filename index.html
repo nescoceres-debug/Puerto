@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Puerto · Clima, viento y marea</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#0b1620">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Puerto">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <style>
   :root{
     --bg:#0b1620; --card:#12212e; --card2:#172a3a; --line:#24394b;
@@ -50,6 +58,18 @@
   .err{background:#3a1d1d;border-color:#6b2b2b}
   .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .ico{font-size:22px}
+  .days{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
+  .day{flex:none;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:7px 11px;text-align:center;cursor:pointer;color:var(--tx);min-width:76px}
+  .day b{display:block;font-size:14px}
+  .day span{display:block;font-size:12px;color:var(--mut)}
+  .day.on{border-color:var(--acc);background:#1b3a50}
+  .day.inrange{border-color:#2c5f7c}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{border:0;border-radius:0;padding:6px 12px}
+  .seg button.on{background:var(--acc);color:#0b1620;font-weight:600}
+  #daily tr[data-i]{cursor:pointer}
+  #daily tr[data-i]:hover{background:var(--card2)}
+  #daily tr.sel{background:#1b3a50}
 </style>
 </head>
 <body>
@@ -61,6 +81,16 @@
 
 <main>
   <section class="card" id="errbox" hidden></section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+      <h2 style="margin:0">Elegí el día · <span id="rangeLbl" style="color:var(--tx)"></span></h2>
+      <div class="row"><span class="note">Ver</span>
+        <div class="seg" id="spanSeg"><button data-s="1">1 día</button><button data-s="2">2 días</button><button data-s="3">3 días</button></div>
+      </div>
+    </div>
+    <div class="days" id="days"></div>
+  </section>
 
   <section class="card half">
     <h2>Ahora</h2>
@@ -82,8 +112,8 @@
     </div>
   </section>
 
-  <section class="card">
-    <h2>Marea · próximas pleamares y bajamares</h2>
+  <section class="card" id="tideCard">
+    <h2 id="tideH">Marea · pleamares y bajamares</h2>
     <div class="tides" id="tideList"></div>
     <div id="tideChart" style="margin-top:12px"></div>
     <div class="legend"><span><i style="background:var(--tide)"></i>Altura de marea</span><span><i style="background:var(--r)"></i>Ahora</span></div>
@@ -95,18 +125,18 @@
   </section>
 
   <section class="card">
-    <h2>Viento y ráfagas · próximas 72 h (nudos)</h2>
+    <h2 id="windH">Viento y ráfagas (nudos)</h2>
     <div id="windChart"></div>
     <div class="legend"><span><i style="background:var(--acc)"></i>Viento medio</span><span><i style="background:var(--o)"></i>Ráfagas</span><span>Flechas: hacia dónde sopla</span></div>
   </section>
 
   <section class="card">
-    <h2>Pronóstico 7 días</h2>
+    <h2>Pronóstico 10 días <span class="note" style="text-transform:none;letter-spacing:0">· tocá un día para verlo en detalle</span></h2>
     <div class="scroll"><table id="daily"></table></div>
   </section>
 
   <section class="card">
-    <h2>Hora por hora · próximas 24 h</h2>
+    <h2 id="hourlyH">Hora por hora</h2>
     <div class="scroll"><table id="hourly"></table></div>
   </section>
 
@@ -170,6 +200,51 @@ const wmo = c => WMO[c] || ["–","❔"];
 const arrow = (deg, size=14, color="currentColor") =>
   `<svg width="${size}" height="${size}" viewBox="-10 -10 20 20" style="vertical-align:middle"><path d="M0,-8 L5,6 L0,3 L-5,6Z" fill="${color}" transform="rotate(${deg+180})"/></svg>`;
 
+// ---------- Día elegido ----------
+const S = {w:null, m:null, nowT:0, day:0, span:1};
+try{ S.span = +localStorage.getItem("span") || 1; }catch(e){}
+document.querySelectorAll("#spanSeg button").forEach(b => b.onclick = () => {
+  S.span = +b.dataset.s; try{ localStorage.setItem("span", S.span); }catch(e){}
+  renderView();
+});
+function selectDay(i, scroll){
+  S.day = i; renderView();
+  if(scroll) $("tideCard").scrollIntoView({behavior:"smooth", block:"start"});
+}
+const dayStart = i => parseT(S.w.daily.time[i] + "T00:00");
+const dayName = i => i===0 ? "Hoy" : i===1 ? "Mañana" : dayLbl(dayStart(i));
+// Ventana de tiempo a mostrar: hoy arranca desde ahora; otro día, desde las 00:00
+function viewWindow(){
+  const a = S.day===0 ? S.nowT - 3600e3 : dayStart(S.day);
+  const b = S.day===0 ? S.nowT + S.span*86400e3 : dayStart(S.day) + S.span*86400e3;
+  return [a, b];
+}
+function renderView(){
+  if(!S.w) return;
+  const d = S.w.daily, last = Math.min(S.day + S.span - 1, d.time.length - 1);
+  document.querySelectorAll("#spanSeg button").forEach(b => b.classList.toggle("on", +b.dataset.s === S.span));
+  $("days").innerHTML = d.time.map((t,i) => {
+    const [desc, ico] = wmo(d.weather_code[i]);
+    return `<button class="day ${i===S.day?"on":(i>S.day&&i<=last?"inrange":"")}" data-i="${i}" title="${desc}">
+      <b>${dayName(i)}</b><span>${ico} ${r0(d.temperature_2m_max[i])}°</span>
+      <span style="color:${windColor(d.wind_speed_10m_max[i])}">${r0(d.wind_speed_10m_max[i])}/${r0(d.wind_gusts_10m_max[i])} kn</span></button>`;
+  }).join("");
+  $("days").querySelectorAll(".day").forEach(b => b.onclick = () => selectDay(+b.dataset.i, false));
+  const on = $("days").querySelector(".day.on"); if(on) on.scrollIntoView({block:"nearest", inline:"nearest"});
+  const lbl = S.day===0
+    ? (S.span===1 ? "próximas 24 h" : `próximas ${S.span*24} h`)
+    : dayName(S.day) + (last>S.day ? " → " + dayName(last) : "");
+  $("rangeLbl").textContent = lbl;
+  $("tideH").textContent = "Marea · " + lbl;
+  $("windH").textContent = "Viento y ráfagas (nudos) · " + lbl;
+  $("hourlyH").textContent = "Hora por hora · " + lbl + (S.span>1 ? " (cada 3 h)" : "");
+  const win = viewWindow();
+  renderWind(win);
+  renderHourly(win);
+  renderDaily();
+  if(S.m) renderTide();
+}
+
 // ---------- Carga ----------
 async function load(){
   const p = PORTS.find(x => x.id === sel.value);
@@ -178,28 +253,26 @@ async function load(){
   $("errbox").hidden = true;
   const zeroKey = "zero-" + p.id;
   $("zero").value = localStorage.getItem(zeroKey) || "";
-  $("zero").oninput = () => { localStorage.setItem(zeroKey, $("zero").value); if(window._tide) renderTide(window._tide); };
+  $("zero").oninput = () => { localStorage.setItem(zeroKey, $("zero").value); if(S.m) renderTide(); };
 
   const wx = `https://api.open-meteo.com/v1/forecast?latitude=${p.lat}&longitude=${p.lon}`
     + `&current=temperature_2m,apparent_temperature,relative_humidity_2m,pressure_msl,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation`
     + `&hourly=temperature_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,visibility,is_day`
     + `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset`
-    + `&wind_speed_unit=kn&timezone=auto&forecast_days=7`;
+    + `&wind_speed_unit=kn&timezone=auto&forecast_days=10`;
   const mar = `https://marine-api.open-meteo.com/v1/marine?latitude=${p.mlat}&longitude=${p.mlon}`
     + `&hourly=sea_level_height_msl,wave_height,wave_direction,wave_period&current=wave_height,wave_direction,wave_period`
-    + `&timezone=auto&forecast_days=7&past_days=1`;
+    + `&timezone=auto&forecast_days=10&past_days=1`;
 
   try{
     const [w, m] = await Promise.all([fetch(wx).then(chk), fetch(mar).then(chk).catch(e => ({error:e.message}))]);
-    const nowT = Date.now() + w.utc_offset_seconds*1000; // "UTC falso" en hora local del puerto
+    S.w = w; S.nowT = Date.now() + w.utc_offset_seconds*1000; // "UTC falso" en hora local del puerto
+    S.m = (m.error || !m.hourly || m.hourly.sea_level_height_msl.every(v => v==null)) ? null : m;
+    S.day = Math.min(S.day, w.daily.time.length-1);
     renderNow(w, m);
-    renderWind(w, nowT);
-    renderDaily(w);
-    renderHourly(w, nowT);
-    if(m.error || !m.hourly || m.hourly.sea_level_height_msl.every(v => v==null)) throw new Error("Sin datos de marea para este punto" + (m.error?": "+m.error:""));
-    window._tide = {m, nowT};
-    renderTide(window._tide);
-    $("sub").textContent = `${p.prov} · actualizado ${hhmm(nowT)} (hora local)`;
+    renderView();
+    if(!S.m) throw new Error("Sin datos de marea para este punto" + (m.error?": "+m.error:""));
+    $("sub").textContent = `${p.prov} · actualizado ${hhmm(S.nowT)} (hora local)`;
   }catch(e){
     $("errbox").hidden = false; $("errbox").className = "card err";
     $("errbox").textContent = "Error: " + e.message;
@@ -256,7 +329,7 @@ function chart({xs, series, nowX, yMin, yMax, yFmt=v=>v, height=200, extraSvg=()
   for(const t of xs){
     const h = new Date(t).getUTCHours();
     if(h===0) g += `<line x1="${X(t)}" x2="${X(t)}" y1="${T}" y2="${H-B}" stroke="#3a5468" stroke-width="1.5"/><text x="${X(t)+4}" y="${H-8}" style="fill:var(--tx)">${dayLbl(t)}</text>`;
-    else if(h%6===0) g += `<line x1="${X(t)}" x2="${X(t)}" y1="${T}" y2="${H-B}" stroke="var(--line)" stroke-dasharray="2 4"/><text x="${X(t)}" y="${H-8}" text-anchor="middle">${pad(h)}</text>`;
+    else if(h % ((x1-x0) <= 36*3600e3 ? 3 : 6) === 0) g += `<line x1="${X(t)}" x2="${X(t)}" y1="${T}" y2="${H-B}" stroke="var(--line)" stroke-dasharray="2 4"/><text x="${X(t)}" y="${H-8}" text-anchor="middle">${pad(h)}</text>`;
   }
   for(const s of series){
     const pts = s.ys.map((v,i)=> v==null?null:[X(xs[i]),Y(v)]).filter(Boolean);
@@ -272,16 +345,16 @@ function chart({xs, series, nowX, yMin, yMax, yFmt=v=>v, height=200, extraSvg=()
 function niceStep(raw){ const p = Math.pow(10, Math.floor(Math.log10(raw))); const n = raw/p; return (n<1.5?1:n<3?2:n<7?5:10)*p; }
 
 // ---------- Viento 72 h ----------
-function renderWind(w, nowT){
-  const h = w.hourly, all = h.time.map(parseT);
-  let i0 = all.findIndex(t => t >= nowT - 3600e3); if(i0<0) i0=0;
-  const idx = [...Array(73).keys()].map(k=>k+i0).filter(i=>i<all.length);
+function renderWind([a, b]){
+  const h = S.w.hourly, all = h.time.map(parseT), nowT = S.nowT;
+  const idx = all.map((t,i)=>i).filter(i => all[i] >= a && all[i] <= b);
+  if(idx.length < 2){ $("windChart").innerHTML = `<p class="note">Sin datos para esos días.</p>`; return; }
   const xs = idx.map(i=>all[i]), sp = idx.map(i=>h.wind_speed_10m[i]), gu = idx.map(i=>h.wind_gusts_10m[i]), dr = idx.map(i=>h.wind_direction_10m[i]);
   const yMax = Math.max(20, Math.ceil(Math.max(...gu)/5)*5 + 5);
   $("windChart").innerHTML = chart({
     xs, nowX:nowT, yMin:0, yMax, height:230,
     series:[{ys:gu, color:"var(--o)", width:1.5, dash:"5 3"},{ys:sp, color:"var(--acc)", fill:true, width:2.5}],
-    extraSvg:(X,Y)=> xs.map((t,k)=> k%3 ? "" :
+    extraSvg:(X,Y)=> xs.map((t,k)=> k % (S.span===1 ? 1 : 3) ? "" :
       `<g transform="translate(${X(t)},${Y(yMax)+8}) rotate(${dr[k]+180})"><path d="M0,-6 L4,5 L0,2 L-4,5Z" fill="${windColor(sp[k])}"/></g>`).join("")
   });
 }
@@ -301,17 +374,19 @@ function findExtremes(ts, ys){
   }
   return out;
 }
-function renderTide({m, nowT}){
+function renderTide(){
+  const m = S.m, nowT = S.nowT, [wa, wb] = viewWindow();
   const zero = parseFloat($("zero").value) || 0;
   const ts = m.hourly.time.map(parseT), ys = m.hourly.sea_level_height_msl.map(v => v==null?null:v+zero);
   const ex = findExtremes(ts, ys);
   const nextIdx = ex.findIndex(e => e.t > nowT);
-  const list = ex.filter(e => e.t > nowT - 7*3600e3).slice(0, 12);
+  const listFrom = S.day===0 ? nowT - 7*3600e3 : wa;
+  const list = ex.filter(e => e.t >= listFrom && e.t <= wb);
   const ref = zero ? "sobre el cero del puerto" : "respecto al nivel medio";
   // estado actual
   let state = "";
   const iNow = ts.findIndex(t => t >= nowT);
-  if(iNow>0 && ys[iNow]!=null){
+  if(S.day===0 && iNow>0 && ys[iNow]!=null){
     const f = (nowT - ts[iNow-1])/(ts[iNow]-ts[iNow-1]);
     const hNow = ys[iNow-1] + f*(ys[iNow]-ys[iNow-1]);
     const nx = ex[nextIdx];
@@ -326,10 +401,11 @@ function renderTide({m, nowT}){
   $("tideList").innerHTML = state + list.map(e => `<div class="tide ${e.high?"":"low"} ${ex.indexOf(e)===nextIdx?"next":""}" style="${e.t<nowT?"opacity:.5":""}">
       <span>${dayLbl(e.t)} · ${e.high?"Pleamar":"Bajamar"}</span><b>${hhmm(e.t)}</b> &nbsp;${e.h.toFixed(2)} m</div>`).join("");
 
-  // curva: desde 6 h atrás hasta 3 días
-  const i0 = Math.max(0, ts.findIndex(t => t >= nowT - 6*3600e3));
-  const i1 = Math.min(ts.length-1, i0 + 6 + 72);
-  const xs = ts.slice(i0, i1+1), yy = ys.slice(i0, i1+1);
+  // curva: la ventana elegida (hoy: desde 6 h atrás)
+  const ca = S.day===0 ? nowT - 6*3600e3 : wa;
+  const sel_ = ts.map((t,i)=>i).filter(i => ts[i] >= ca && ts[i] <= wb);
+  if(sel_.length < 2){ $("tideChart").innerHTML = `<p class="note">Sin datos de marea para esos días.</p>`; return; }
+  const xs = sel_.map(i=>ts[i]), yy = sel_.map(i=>ys[i]);
   const vals = yy.filter(v=>v!=null), lo = Math.floor(Math.min(...vals)*2)/2 - 0.5, hi = Math.ceil(Math.max(...vals)*2)/2 + 0.5;
   $("tideChart").innerHTML = chart({
     xs, nowX:nowT, yMin:lo, yMax:hi, height:220, yFmt:v=>v+" m",
@@ -344,12 +420,12 @@ function renderTide({m, nowT}){
 }
 
 // ---------- Pronóstico diario ----------
-function renderDaily(w){
-  const d = w.daily;
+function renderDaily(){
+  const d = S.w.daily, last = S.day + S.span - 1;
   let html = `<tr><th>Día</th><th></th><th>Máx / Mín</th><th>Lluvia</th><th>Viento máx</th><th>Ráfagas</th><th>Dir.</th><th>Sol</th></tr>`;
   d.time.forEach((t,i)=>{
     const T = parseT(t+"T00:00"), [desc, ico] = wmo(d.weather_code[i]);
-    html += `<tr><td><b>${i===0?"Hoy":dayLbl(T)}</b></td><td title="${desc}">${ico} <span class="note">${desc}</span></td>
+    html += `<tr data-i="${i}" class="${i>=S.day&&i<=last?"sel":""}"><td><b>${dayName(i)}</b></td><td title="${desc}">${ico} <span class="note">${desc}</span></td>
       <td>${r0(d.temperature_2m_max[i])}° / ${r0(d.temperature_2m_min[i])}°</td>
       <td>${r1(d.precipitation_sum[i])} mm <span class="note">${r0(d.precipitation_probability_max[i])}%</span></td>
       <td><span style="color:${windColor(d.wind_speed_10m_max[i])}">●</span> ${r0(d.wind_speed_10m_max[i])} kn</td>
@@ -358,14 +434,16 @@ function renderDaily(w){
       <td class="note">${hhmm(parseT(d.sunrise[i]))} – ${hhmm(parseT(d.sunset[i]))}</td></tr>`;
   });
   $("daily").innerHTML = html;
+  $("daily").querySelectorAll("tr[data-i]").forEach(tr => tr.onclick = () => selectDay(+tr.dataset.i, true));
 }
 
 // ---------- Hora por hora ----------
-function renderHourly(w, nowT){
-  const h = w.hourly, ts = h.time.map(parseT);
-  let i0 = ts.findIndex(t => t >= nowT - 3600e3); if(i0<0) i0 = 0;
+function renderHourly([a, b]){
+  const h = S.w.hourly, ts = h.time.map(parseT), step = S.span===1 ? 1 : 3;
+  const idx = ts.map((t,i)=>i).filter(i => ts[i] >= a && ts[i] < b && (step===1 || new Date(ts[i]).getUTCHours() % step === 0));
   let html = `<tr><th>Hora</th><th></th><th>Temp</th><th>Viento</th><th>Ráfagas</th><th>Dir.</th><th>Lluvia</th><th>Visib.</th></tr>`;
-  for(let i=i0;i<Math.min(i0+24, ts.length);i++){
+  const i0 = idx[0];
+  for(const i of idx){
     let [desc, ico] = wmo(h.weather_code[i]);
     if(!h.is_day[i] && h.weather_code[i] <= 2) ico = "🌙";
     html += `<tr><td>${new Date(ts[i]).getUTCHours()===0||i===i0?`<span class="note">${dayLbl(ts[i])}</span> `:""}<b>${hhmm(ts[i])}</b></td>
@@ -391,6 +469,12 @@ function renderLinks(p){
 
 load();
 setInterval(load, 15*60*1000); // refresca cada 15 min
+// al volver a la app (desde otra app o con el celu bloqueado), actualizar si pasaron más de 10 min
+let lastLoad = Date.now();
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && Date.now() - lastLoad > 10*60*1000){ lastLoad = Date.now(); load(); }
+});
+if("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(()=>{});
 </script>
 </body>
 </html>
